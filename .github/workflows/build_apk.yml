@@ -1,26 +1,226 @@
-name: Android CI from Zip
-on: [push, workflow_dispatch]
+name: Build NyayaAI APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION:        '17'
+  ANDROID_API_LEVEL:   '34'
+  ANDROID_BUILD_TOOLS: '34.0.0'
+  NDK_VERSION:         '25.2.9519653'
+  RUST_TARGET:         'aarch64-linux-android'
+  ZIP_NAME:            'NyayaAI.zip'
+  PROJECT_DIR:         'NyayaAI'
+  RUST_CORE_DIR:       'NyayaAI/rust-core'
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build APK (Rust JNI + Gradle)
+    runs-on: ubuntu-22.04
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Unzip source code
-        run: unzip your_file_name.zip -d . # Replace your_file_name with your actual zip name
-      - name: set up JDK 17
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Extract NyayaAI source zip
+        run: |
+          if [ -f "${{ env.ZIP_NAME }}" ]; then
+            echo "Extracting ${{ env.ZIP_NAME }}..."
+            unzip -q "${{ env.ZIP_NAME }}" -d .
+            echo "Done. Contents:"
+            ls -la "${{ env.PROJECT_DIR }}/"
+          elif [ -d "${{ env.PROJECT_DIR }}" ]; then
+            echo "Source directory already present."
+            ls -la "${{ env.PROJECT_DIR }}/"
+          else
+            echo "ERROR: Neither ${{ env.ZIP_NAME }} nor ${{ env.PROJECT_DIR }}/ found."
+            exit 1
+          fi
+
+      - name: Validate project structure
+        run: |
+          REQUIRED=(
+            "${{ env.PROJECT_DIR }}/settings.gradle"
+            "${{ env.PROJECT_DIR }}/build.gradle"
+            "${{ env.PROJECT_DIR }}/app/build.gradle"
+            "${{ env.PROJECT_DIR }}/app/src/main/AndroidManifest.xml"
+            "${{ env.PROJECT_DIR }}/app/src/main/assets/laws.json"
+            "${{ env.PROJECT_DIR }}/rust-core/Cargo.toml"
+            "${{ env.PROJECT_DIR }}/rust-core/src/lib.rs"
+          )
+          ALL_OK=true
+          for f in "${REQUIRED[@]}"; do
+            if [ -f "$f" ]; then echo "  OK  $f"
+            else echo "  MISSING: $f"; ALL_OK=false; fi
+          done
+          if [ "$ALL_OK" = false ]; then
+            echo "ERROR: Required files missing."; exit 1
+          fi
+          echo "All required files present."
+
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
-          cache: gradle
-      - name: Grant execute permission for gradlew
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager --install \
+            "platforms;android-${{ env.ANDROID_API_LEVEL }}" \
+            "build-tools;${{ env.ANDROID_BUILD_TOOLS }}" \
+            "ndk;${{ env.NDK_VERSION }}" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            --no_https 2>&1 | grep -v "Warning\|Skipping\|\[="
+          echo "SDK setup complete."
+
+      - name: Export NDK path
+        run: |
+          NDK_PATH="$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "NDK_HOME=$NDK_PATH"         >> $GITHUB_ENV
+          echo "NDK at: $NDK_PATH"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ env.RUST_TARGET }}
+
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.RUST_CORE_DIR }}/target
+          key: rust-stable-${{ env.RUST_TARGET }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-stable-${{ env.RUST_TARGET }}-
+            rust-stable-
+
+      - name: Install cargo-ndk
+        run: |
+          if cargo ndk --version &>/dev/null 2>&1; then
+            echo "cargo-ndk already installed: $(cargo ndk --version)"
+          else
+            cargo install cargo-ndk --locked
+            echo "Installed: $(cargo ndk --version)"
+          fi
+
+      - name: Build Rust JNI core (arm64-v8a)
+        working-directory: ${{ env.RUST_CORE_DIR }}
+        run: |
+          echo "Rust: $(rustc --version)"
+          echo "cargo-ndk: $(cargo ndk --version)"
+          echo "NDK: $ANDROID_NDK_HOME"
+          cargo ndk \
+            -t arm64-v8a \
+            -o "../app/src/main/jniLibs" \
+            build --release
+          SO="../app/src/main/jniLibs/arm64-v8a/libnyaya_core.so"
+          if [ -f "$SO" ]; then
+            echo "SUCCESS: libnyaya_core.so ($(du -sh $SO | cut -f1))"
+            file "$SO"
+          else
+            echo "ERROR: libnyaya_core.so not found"; exit 1
+          fi
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      - name: Make gradlew executable
+        working-directory: ${{ env.PROJECT_DIR }}
         run: chmod +x gradlew
-      - name: Build with Gradle
-        run: ./gradlew assembleDebug
-      - name: Upload APK
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          ./gradlew assembleDebug \
+            --stacktrace \
+            --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=512m"
+          echo "APK files:"
+          find . -name "*.apk" -type f | while read apk; do
+            echo "  $(du -sh $apk | cut -f1)  $apk"
+          done
+
+      - name: Build and Sign Release APK
+        if: |
+          github.ref == 'refs/heads/main' &&
+          secrets.KEYSTORE_BASE64 != ''
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          KEYSTORE_BASE64:   ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > /tmp/nyaya.jks
+          ./gradlew assembleRelease \
+            --no-daemon \
+            -Pandroid.injected.signing.store.file=/tmp/nyaya.jks \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+          rm -f /tmp/nyaya.jks
+
+      - name: Build summary
+        run: |
+          echo "## NyayaAI Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |"          >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|"          >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| NDK    | ${{ env.NDK_VERSION }} |"  >> $GITHUB_STEP_SUMMARY
+          echo "| Rust   | $(rustc --version) |"      >> $GITHUB_STEP_SUMMARY
+          echo ""                                     >> $GITHUB_STEP_SUMMARY
+          echo "### APK Files"                        >> $GITHUB_STEP_SUMMARY
+          find ${{ env.PROJECT_DIR }} -name "*.apk" -type f | while read apk; do
+            echo "- \`$(basename $apk)\` ($(du -sh $apk | cut -f1))" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: my-app-apk
-          path: app/build/outputs/apk/debug/*.apk
-          
+          name: NyayaAI-debug-apk-${{ github.run_number }}
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload Release APK
+        if: secrets.KEYSTORE_BASE64 != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: NyayaAI-release-signed-${{ github.run_number }}
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload Rust .so
+        uses: actions/upload-artifact@v4
+        with:
+          name: NyayaAI-libnyaya_core-${{ github.run_number }}
+          path: ${{ env.PROJECT_DIR }}/app/src/main/jniLibs/arm64-v8a/libnyaya_core.so
+          retention-days: 14
+          if-no-files-found: error
