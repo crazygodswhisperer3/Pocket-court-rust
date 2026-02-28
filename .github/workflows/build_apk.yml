@@ -165,37 +165,17 @@ jobs:
             echo "  $(du -sh $apk | cut -f1)  $apk"
           done
 
-      - name: Build and Sign Release APK
-        if: |
-          github.ref == 'refs/heads/main' &&
-          secrets.KEYSTORE_BASE64 != ''
-        working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          KEYSTORE_BASE64:   ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
-        run: |
-          echo "$KEYSTORE_BASE64" | base64 --decode > /tmp/nyaya.jks
-          ./gradlew assembleRelease \
-            --no-daemon \
-            -Pandroid.injected.signing.store.file=/tmp/nyaya.jks \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
-          rm -f /tmp/nyaya.jks
-
       - name: Build summary
         run: |
-          echo "## NyayaAI Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| Item | Value |"          >> $GITHUB_STEP_SUMMARY
-          echo "|------|-------|"          >> $GITHUB_STEP_SUMMARY
-          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "## NyayaAI Build Summary"              >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |"                      >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|"                      >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |"   >> $GITHUB_STEP_SUMMARY
           echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| NDK    | ${{ env.NDK_VERSION }} |"  >> $GITHUB_STEP_SUMMARY
-          echo "| Rust   | $(rustc --version) |"      >> $GITHUB_STEP_SUMMARY
-          echo ""                                     >> $GITHUB_STEP_SUMMARY
-          echo "### APK Files"                        >> $GITHUB_STEP_SUMMARY
+          echo "| NDK    | ${{ env.NDK_VERSION }} |"   >> $GITHUB_STEP_SUMMARY
+          echo "| Rust   | $(rustc --version) |"       >> $GITHUB_STEP_SUMMARY
+          echo ""                                      >> $GITHUB_STEP_SUMMARY
+          echo "### APK Files"                         >> $GITHUB_STEP_SUMMARY
           find ${{ env.PROJECT_DIR }} -name "*.apk" -type f | while read apk; do
             echo "- \`$(basename $apk)\` ($(du -sh $apk | cut -f1))" >> $GITHUB_STEP_SUMMARY
           done
@@ -207,15 +187,6 @@ jobs:
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           retention-days: 30
           if-no-files-found: error
-
-      - name: Upload Release APK
-        if: secrets.KEYSTORE_BASE64 != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: NyayaAI-release-signed-${{ github.run_number }}
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
-          retention-days: 90
-          if-no-files-found: warn
 
       - name: Upload Rust .so
         uses: actions/upload-artifact@v4
