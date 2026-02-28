@@ -1,4 +1,4 @@
-name: Android CI
+name: Android CI from Zip
 on: [push, workflow_dispatch]
 
 jobs:
@@ -6,6 +6,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Unzip source code
+        run: unzip your_file_name.zip -d . # Replace your_file_name with your actual zip name
       - name: set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -21,3 +23,4 @@ jobs:
         with:
           name: my-app-apk
           path: app/build/outputs/apk/debug/*.apk
+          
